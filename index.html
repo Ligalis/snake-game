@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#102018">
+  <title>Змейка — Telegram Mini App</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: var(--tg-theme-bg-color, #102018);
+      --text: var(--tg-theme-text-color, #f2fff5);
+      --muted: var(--tg-theme-hint-color, #9ab4a1);
+      --green: #69f59a;
+      --panel: var(--tg-theme-secondary-bg-color, #193126);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      min-height: 100dvh;
+      padding: max(14px, env(safe-area-inset-top)) 14px max(18px, env(safe-area-inset-bottom));
+      background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex; justify-content: center; overscroll-behavior: none;
+    }
+    .app { width: min(100%, 460px); text-align: center; }
+    h1 { margin: 8px 0 4px; color: var(--green); font-size: clamp(27px, 7vw, 36px); }
+    .subtitle { color: var(--muted); margin: 0 0 16px; font-size: 14px; }
+    .stats { display: flex; justify-content: space-between; gap: 10px; margin: 0 0 12px; }
+    .stat { flex: 1; padding: 10px 12px; background: var(--panel); border-radius: 12px; font-weight: 700; }
+    .stat span { display: block; color: var(--muted); font-size: 12px; font-weight: 500; margin-bottom: 3px; }
+    .board-wrap { padding: 9px; background: var(--panel); border: 1px solid #315541; border-radius: 17px; }
+    canvas { display: block; width: 100%; height: auto; aspect-ratio: 1; background: #0a1710; border-radius: 10px; touch-action: none; }
+    #status { min-height: 24px; margin: 12px 0; color: var(--muted); font-size: 14px; }
+    .main-btn { width: 100%; border: 0; border-radius: 12px; padding: 14px; background: var(--green); color: #092014; font-size: 17px; font-weight: 800; }
+    .controls { display: grid; grid-template-columns: repeat(3, 62px); gap: 7px; justify-content: center; margin: 15px auto 8px; }
+    .controls button { height: 54px; border: 0; border-radius: 12px; background: var(--panel); color: var(--text); font-size: 23px; font-weight: 700; }
+    .controls button:active { background: #315541; }
+    .empty { visibility: hidden; }
+    .help { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <h1>🐍 ЗМЕЙКА</h1>
+    <p class="subtitle">Собирай яблоки и побей свой рекорд!</p>
+
+    <section class="stats" aria-label="Статистика игры">
+      <div class="stat"><span>СЧЁТ</span><strong id="score">0</strong></div>
+      <div class="stat"><span>РЕКОРД</span><strong id="best">0</strong></div>
+    </section>
+
+    <div class="board-wrap">
+      <canvas id="game" width="400" height="400" aria-label="Игровое поле"></canvas>
+    </div>
+
+    <p id="status" role="status">Нажми «Играть», чтобы начать.</p>
+    <button class="main-btn" id="start">▶ Играть</button>
+
+    <div class="controls" aria-label="Кнопки управления">
+      <span class="empty"></span>
+      <button type="button" data-dir="up" aria-label="Вверх">▲</button>
+      <span class="empty"></span>
+      <button type="button" data-dir="left" aria-label="Влево">◀</button>
+      <button type="button" data-dir="down" aria-label="Вниз">▼</button>
+      <button type="button" data-dir="right" aria-label="Вправо">▶</button>
+    </div>
+    <p class="help">Управление: свайпы по полю, кнопки или стрелки клавиатуры.</p>
+  </main>
+
+<script>
+(() => {
+  // Подключение Telegram Mini Apps API. В обычном браузере игра тоже работает.
+  const tg = window.Telegram?.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    try { tg.setHeaderColor("#102018"); } catch (_) {}
+    try { tg.setBackgroundColor("#102018"); } catch (_) {}
+  }
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const scoreEl = document.getElementById("score");
+  const bestEl = document.getElementById("best");
+  const statusEl = document.getElementById("status");
+  const startBtn = document.getElementById("start");
+
+  const CELLS = 20;
+  const CELL = canvas.width / CELLS;
+  const BEST_KEY = "telegram_snake_best_v1";
+
+  let snake = [];
+  let food = { x: 14, y: 10 };
+  let direction = { x: 1, y: 0 };
+  let queuedDirection = { x: 1, y: 0 };
+  let score = 0;
+  let best = readBest();
+  let timer = null;
+  let running = false;
+
+  bestEl.textContent = best;
+
+  function readBest() {
+    try { return Number(localStorage.getItem(BEST_KEY)) || 0; }
+    catch (_) { return 0; }
+  }
+
+  function saveBest() {
+    try { localStorage.setItem(BEST_KEY, String(best)); }
+    catch (_) {}
+  }
+
+  function haptic(type = "light") {
+    try { tg?.HapticFeedback?.impactOccurred(type); } catch (_) {}
+  }
+
+  function placeFood() {
+    do {
+      food = {
+        x: Math.floor(Math.random() * CELLS),
+        y: Math.floor(Math.random() * CELLS)
+      };
+    } while (snake.some(part => part.x === food.x && part.y === food.y));
+  }
+
+  function draw() {
+    ctx.fillStyle = "#0a1710";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = "#14291d";
+    ctx.lineWidth = 1;
+    for (let i = 1; i < CELLS; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * CELL, 0);
+      ctx.lineTo(i * CELL, canvas.height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, i * CELL);
+      ctx.lineTo(canvas.width, i * CELL);
+      ctx.stroke();
+    }
+
+    // Яблоко
+    const fx = (food.x + 0.5) * CELL;
+    const fy = (food.y + 0.5) * CELL;
+    ctx.fillStyle = "#ff555d";
+    ctx.beginPath();
+    ctx.arc(fx, fy, CELL * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#9cffae";
+    ctx.fillRect(fx - 1, fy - CELL * 0.48, 3, 6);
+
+    // Змейка
+    snake.forEach((part, index) => {
+      ctx.fillStyle = index === 0 ? "#b6ffc8" : "#45cf79";
+      ctx.beginPath();
+      ctx.roundRect(part.x * CELL + 1.5, part.y * CELL + 1.5, CELL - 3, CELL - 3, 5);
+      ctx.fill();
+    });
+
+    // Глазки головы
+    if (snake.length) {
+      const head = snake[0];
+      const cx = (head.x + 0.5) * CELL;
+      const cy = (head.y + 0.5) * CELL;
+      ctx.fillStyle = "#123b25";
+      ctx.beginPath();
+      ctx.arc(cx - 4, cy - 3, 1.8, 0, Math.PI * 2);
+      ctx.arc(cx + 4, cy - 3, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function startGame() {
+    clearInterval(timer);
+    snake = [
+      { x: 9, y: 10 },
+      { x: 8, y: 10 },
+      { x: 7, y: 10 }
+    ];
+    direction = { x: 1, y: 0 };
+    queuedDirection = { x: 1, y: 0 };
+    score = 0;
+    running = true;
+
+    scoreEl.textContent = "0";
+    statusEl.textContent = "Игра началась! Собирай яблоки 🍎";
+    startBtn.textContent = "↻ Начать заново";
+
+    placeFood();
+    draw();
+    timer = setInterval(tick, 135);
+    haptic("light");
+  }
+
+  function finishGame() {
+    clearInterval(timer);
+    timer = null;
+    running = false;
+    statusEl.textContent = `Игра окончена! Твой счёт: ${score}`;
+    startBtn.textContent = "↻ Играть снова";
+    try { tg?.HapticFeedback?.notificationOccurred("error"); } catch (_) {}
+  }
+
+  function tick() {
+    direction = queuedDirection;
+    const head = {
+      x: snake[0].x + direction.x,
+      y: snake[0].y + direction.y
+    };
+    const ate = head.x === food.x && head.y === food.y;
+
+    // Если змейка не ест, её последний сегмент освободит клетку в этот ход.
+    const collisionBody = ate ? snake : snake.slice(0, -1);
+    const hitWall = head.x < 0 || head.x >= CELLS || head.y < 0 || head.y >= CELLS;
+    const hitSelf = collisionBody.some(part => part.x === head.x && part.y === head.y);
+
+    if (hitWall || hitSelf) {
+      finishGame();
+      return;
+    }
+
+    snake.unshift(head);
+
+    if (ate) {
+      score += 10;
+      scoreEl.textContent = score;
+      if (score > best) {
+        best = score;
+        bestEl.textContent = best;
+        saveBest();
+      }
+      placeFood();
+      haptic("medium");
+
+      // Постепенно ускоряем игру, но не делаем её слишком быстрой.
+      clearInterval(timer);
+      timer = setInterval(tick, Math.max(70, 135 - Math.floor(score / 50) * 8));
+    } else {
+      snake.pop();
+    }
+
+    draw();
+  }
+
+  function changeDirection(name) {
+    if (!running) return;
+
+    const directions = {
+      up: { x: 0, y: -1 },
+      down: { x: 0, y: 1 },
+      left: { x: -1, y: 0 },
+      right: { x: 1, y: 0 }
+    };
+    const next = directions[name];
+    if (!next) return;
+
+    // Запрещаем разворот прямо в противоположную сторону.
+    if (next.x === -direction.x && next.y === -direction.y) return;
+    queuedDirection = next;
+  }
+
+  startBtn.addEventListener("click", startGame);
+
+  document.querySelectorAll("[data-dir]").forEach(button => {
+    button.addEventListener("click", () => changeDirection(button.dataset.dir));
+  });
+
+  document.addEventListener("keydown", event => {
+    const keys = {
+      ArrowUp: "up", ArrowDown: "down",
+      ArrowLeft: "left", ArrowRight: "right",
+      w: "up", W: "up", s: "down", S: "down",
+      a: "left", A: "left", d: "right", D: "right"
+    };
+    if (keys[event.key]) {
+      event.preventDefault();
+      changeDirection(keys[event.key]);
+    }
+  });
+
+  // Свайпы по игровому полю на телефоне.
+  let touchStartX = 0;
+  let touchStartY = 0;
+  canvas.addEventListener("touchstart", event => {
+    const touch = event.changedTouches[0];
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+  }, { passive: true });
+
+  canvas.addEventListener("touchend", event => {
+    const touch = event.changedTouches[0];
+    const diffX = touch.clientX - touchStartX;
+    const diffY = touch.clientY - touchStartY;
+    if (Math.max(Math.abs(diffX), Math.abs(diffY)) < 18) return;
+
+    if (Math.abs(diffX) > Math.abs(diffY)) {
+      changeDirection(diffX > 0 ? "right" : "left");
+    } else {
+      changeDirection(diffY > 0 ? "down" : "up");
+    }
+  }, { passive: true });
+
+  // Рисуем заставку до первого запуска.
+  snake = [
+    { x: 9, y: 10 },
+    { x: 8, y: 10 },
+    { x: 7, y: 10 }
+  ];
+  draw();
+})();
+</script>
+</body>
+</html>
